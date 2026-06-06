@@ -9,6 +9,22 @@ import { ensureGoogleAppFolder, getAuthedGoogleClient, syncGoogleQuota } from '.
 export const uploadRouter = Router()
 uploadRouter.use(requireAuth)
 
+const MAX_CONCURRENT_UPLOADS_PER_USER = 3
+const activeUploadsByUser = new Map<string, number>()
+
+function tryAcquireUploadSlot(userId: string) {
+  const current = activeUploadsByUser.get(userId) ?? 0
+  if (current >= MAX_CONCURRENT_UPLOADS_PER_USER) return false
+  activeUploadsByUser.set(userId, current + 1)
+  return true
+}
+
+function releaseUploadSlot(userId: string) {
+  const current = activeUploadsByUser.get(userId) ?? 0
+  if (current <= 1) activeUploadsByUser.delete(userId)
+  else activeUploadsByUser.set(userId, current - 1)
+}
+
 type UploadMeta = { fieldName: string; fileName: string; mimeType: string; sizeBytes: bigint; folderId?: string }
 
 function logUpload(message: string, metadata?: Record<string, unknown>) {
@@ -43,10 +59,25 @@ async function selectAccount(userId: string, sizeBytes: bigint, reservedBytesByA
 }
 
 uploadRouter.post('/', async (req: AuthRequest, res, next) => {
+  const userId = req.user!.id
+  if (!tryAcquireUploadSlot(userId)) {
+    logUpload('upload rejected: concurrency limit reached', { userId })
+    return res.status(429).json({ code: 'UPLOAD_TOO_MANY_CONCURRENT', message: `You can run at most ${MAX_CONCURRENT_UPLOADS_PER_USER} uploads at the same time. Please wait for one to finish.` })
+  }
+  let slotReleased = false
+  const releaseSlot = () => {
+    if (slotReleased) return
+    slotReleased = true
+    releaseUploadSlot(userId)
+  }
+  res.on('close', releaseSlot)
   try {
     logUpload('request started', { userId: req.user!.id, contentLength: req.headers['content-length'] })
     const contentType = req.headers['content-type']
-    if (!contentType?.includes('multipart/form-data')) return res.status(400).json({ code: 'UPLOAD_INVALID_CONTENT_TYPE', message: 'multipart/form-data required.' })
+    if (!contentType?.includes('multipart/form-data')) {
+      releaseSlot()
+      return res.status(400).json({ code: 'UPLOAD_INVALID_CONTENT_TYPE', message: 'multipart/form-data required.' })
+    }
 
     const busboy = Busboy({ headers: req.headers, limits: { files: 25, fileSize: env.MAX_UPLOAD_BYTES } })
     const fields: { sizeBytes?: bigint; fileName?: string; mimeType?: string; folderId?: string } = {}

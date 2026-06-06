@@ -2,6 +2,9 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../../config/prisma.js'
 import { requireAuth, type AuthRequest } from '../../middleware/auth.middleware.js'
+import { hashToken, randomToken } from '../../utils/crypto.js'
+import { recordAudit } from '../../utils/audit.js'
+import { streamGoogleFile } from '../files/stream-google-file.js'
 
 export const inviteRouter = Router()
 inviteRouter.use(requireAuth)
@@ -81,6 +84,7 @@ inviteRouter.post('/', async (req: AuthRequest, res, next) => {
       create: { inviterId: req.user!.id, inviteeEmail: email, role: body.role, targetType: body.targetType, targetId: body.targetId, status: existingUser ? 'accepted' : 'pending', acceptedAt: existingUser ? new Date() : null },
       update: { role: body.role, status: existingUser ? 'accepted' : 'pending', acceptedAt: existingUser ? new Date() : null, revokedAt: null },
     })
+    await recordAudit({ userId: req.user!.id, action: 'invite.created', entityType: body.targetType, entityId: body.targetId, metadata: { email, role: body.role } })
     const targetByKey = await resolveTargets([invite])
     return res.status(201).json({ invite: serializeInvite(invite, targetByKey.get(`${invite.targetType}:${invite.targetId}`) ?? null, existingUser) })
   } catch (error) {
@@ -90,9 +94,97 @@ inviteRouter.post('/', async (req: AuthRequest, res, next) => {
 
 inviteRouter.delete('/:id', async (req: AuthRequest, res, next) => {
   try {
-    const result = await prisma.workspaceInvite.updateMany({ where: { id: String(req.params.id), inviterId: req.user!.id, revokedAt: null }, data: { status: 'revoked', revokedAt: new Date() } })
-    if (result.count === 0) return res.status(404).json({ code: 'INVITE_NOT_FOUND', message: 'Invite not found.' })
+    const invite = await prisma.workspaceInvite.findFirst({ where: { id: String(req.params.id), inviterId: req.user!.id, revokedAt: null } })
+    if (!invite) return res.status(404).json({ code: 'INVITE_NOT_FOUND', message: 'Invite not found.' })
+    await prisma.workspaceInvite.update({ where: { id: invite.id }, data: { status: 'revoked', revokedAt: new Date() } })
+    await recordAudit({ userId: req.user!.id, action: 'invite.revoked', entityType: invite.targetType, entityId: invite.targetId, metadata: { email: invite.inviteeEmail } })
     return res.json({ status: 'ok' })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+/**
+ * Returns the set of file ids the current user can access through an accepted
+ * invite — either a file shared directly, or any active file inside a shared folder.
+ */
+async function getInvitedFileAccess(userEmail: string) {
+  const invites = await prisma.workspaceInvite.findMany({
+    where: { inviteeEmail: userEmail, revokedAt: null, status: 'accepted', targetId: { not: '' } },
+  })
+  const fileIds = invites.filter((invite) => invite.targetType === 'file').map((invite) => invite.targetId)
+  const folderIds = invites.filter((invite) => invite.targetType === 'folder').map((invite) => invite.targetId)
+  const roleByFileId = new Map<string, string>()
+  for (const invite of invites) if (invite.targetType === 'file') roleByFileId.set(invite.targetId, invite.role)
+  const roleByFolderId = new Map<string, string>()
+  for (const invite of invites) if (invite.targetType === 'folder') roleByFolderId.set(invite.targetId, invite.role)
+  return { fileIds, folderIds, roleByFileId, roleByFolderId }
+}
+
+async function resolveAccessibleFile(userEmail: string, fileId: string) {
+  const access = await getInvitedFileAccess(userEmail)
+  const file = await prisma.file.findFirst({ where: { id: fileId, status: 'active', archivedAt: null }, include: { connectedAccount: true } })
+  if (!file) return null
+  if (access.fileIds.includes(file.id)) return { file, role: access.roleByFileId.get(file.id) ?? 'viewer' }
+  if (file.folderId && access.folderIds.includes(file.folderId)) return { file, role: access.roleByFolderId.get(file.folderId) ?? 'viewer' }
+  return null
+}
+
+inviteRouter.get('/shared-with-me/files', async (req: AuthRequest, res, next) => {
+  try {
+    const me = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id }, select: { email: true } })
+    const access = await getInvitedFileAccess(me.email)
+    const files = await prisma.file.findMany({
+      where: {
+        status: 'active',
+        archivedAt: null,
+        OR: [
+          ...(access.fileIds.length ? [{ id: { in: access.fileIds } }] : []),
+          ...(access.folderIds.length ? [{ folderId: { in: access.folderIds } }] : []),
+        ],
+      },
+      include: { connectedAccount: { select: { email: true, provider: true } }, folder: { select: { id: true, name: true } }, user: { select: { id: true, name: true, email: true } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    return res.json({
+      files: files.map((file) => ({
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes.toString(),
+        createdAt: file.createdAt.toISOString(),
+        folderName: file.folder?.name ?? null,
+        owner: file.user ? { id: file.user.id, name: file.user.name, email: file.user.email } : null,
+        role: access.roleByFileId.get(file.id) ?? (file.folderId ? access.roleByFolderId.get(file.folderId) : undefined) ?? 'viewer',
+      })),
+    })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+inviteRouter.post('/shared-with-me/files/:id/preview-token', async (req: AuthRequest, res, next) => {
+  try {
+    const me = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id }, select: { email: true } })
+    const resolved = await resolveAccessibleFile(me.email, String(req.params.id))
+    if (!resolved) return res.status(403).json({ code: 'INVITE_ACCESS_DENIED', message: 'You do not have access to this file.' })
+    const token = randomToken(32)
+    await prisma.filePreviewToken.create({ data: { fileId: resolved.file.id, userId: resolved.file.userId, tokenHash: hashToken(token), expiresAt: new Date(Date.now() + 10 * 60_000) } })
+    await recordAudit({ userId: req.user!.id, action: 'file.viewed', entityType: 'file', entityId: resolved.file.id, metadata: { via: 'invite' } })
+    const path = `/files/preview/${token}`
+    return res.status(201).json({ path, url: `${req.protocol}://${req.get('host')}${path}` })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+inviteRouter.get('/shared-with-me/files/:id/download', async (req: AuthRequest, res, next) => {
+  try {
+    const me = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id }, select: { email: true } })
+    const resolved = await resolveAccessibleFile(me.email, String(req.params.id))
+    if (!resolved) return res.status(403).json({ code: 'INVITE_ACCESS_DENIED', message: 'You do not have access to this file.' })
+    await recordAudit({ userId: req.user!.id, action: 'file.downloaded', entityType: 'file', entityId: resolved.file.id, metadata: { via: 'invite' } })
+    return streamGoogleFile(resolved.file, req.headers.range, res, { disposition: 'attachment' })
   } catch (error) {
     return next(error)
   }

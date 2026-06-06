@@ -4,12 +4,17 @@ import { z } from 'zod'
 import { prisma } from '../../config/prisma.js'
 import { env } from '../../config/env.js'
 import { requireAuth, type AuthRequest } from '../../middleware/auth.middleware.js'
+import { rateLimit } from '../../middleware/rate-limit.middleware.js'
 import { hashPassword, verifyPassword } from '../../utils/password.js'
 import { encryptText, hashToken, randomToken } from '../../utils/crypto.js'
+import { recordAudit } from '../../utils/audit.js'
 import { signAccessToken } from '../../utils/jwt.js'
 import { createOAuthClient, syncGoogleQuota } from '../google/google.service.js'
 
 export const authRouter = Router()
+
+const loginLimiter = rateLimit({ windowMs: 15 * 60_000, max: 10, keyPrefix: 'login', message: 'Too many login attempts. Please wait a few minutes and try again.' })
+const registerLimiter = rateLimit({ windowMs: 60 * 60_000, max: 8, keyPrefix: 'register', message: 'Too many accounts created from this network. Please try again later.' })
 
 const registerSchema = z.object({ name: z.string().min(2), email: z.string().email(), password: z.string().min(8), captchaToken: z.string().optional() })
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) })
@@ -40,7 +45,7 @@ async function verifyCaptcha(token: string | undefined) {
   return Boolean(data.success)
 }
 
-authRouter.post('/register', async (req, res, next) => {
+authRouter.post('/register', registerLimiter, async (req, res, next) => {
   try {
     const body = registerSchema.parse(req.body)
     if (!(await verifyCaptcha(body.captchaToken))) return res.status(400).json({ code: 'CAPTCHA_FAILED', message: 'Captcha verification failed.' })
@@ -48,18 +53,20 @@ authRouter.post('/register', async (req, res, next) => {
     if (existing) return res.status(409).json({ code: 'AUTH_EMAIL_TAKEN', message: 'Email already registered.' })
     const user = await prisma.user.create({ data: { name: body.name, email: body.email, passwordHash: await hashPassword(body.password) } })
     const tokens = await createSession(user.id, req)
+    await recordAudit({ userId: user.id, action: 'auth.register', entityType: 'user', entityId: user.id })
     return res.status(201).json({ ...tokens, user: { id: user.id, name: user.name, email: user.email } })
   } catch (error) {
     return next(error)
   }
 })
 
-authRouter.post('/login', async (req, res, next) => {
+authRouter.post('/login', loginLimiter, async (req, res, next) => {
   try {
     const body = loginSchema.parse(req.body)
     const user = await prisma.user.findUnique({ where: { email: body.email } })
     if (!user || !(await verifyPassword(user.passwordHash, body.password))) return res.status(401).json({ code: 'AUTH_INVALID_CREDENTIALS', message: 'Invalid email or password.' })
     const tokens = await createSession(user.id, req)
+    await recordAudit({ userId: user.id, action: 'auth.login', entityType: 'user', entityId: user.id })
     return res.json({ ...tokens, user: { id: user.id, name: user.name, email: user.email } })
   } catch (error) {
     return next(error)
