@@ -4,7 +4,15 @@ import { AvatarStack } from '@/components/drive/AvatarStack'
 import { FileIcon } from '@/components/drive/FileIcon'
 import type { FileItem } from '@/data/drive-data'
 
-export function FileTable({ files, mode = 'default', selectedFileIds = new Set<string>(), allSelected = false, onFileContextMenu, onToggleFile, onToggleAll }: { files: FileItem[]; mode?: 'default' | 'shared' | 'recent' | 'starred' | 'archived'; selectedFileIds?: Set<string>; allSelected?: boolean; onFileContextMenu?: (event: MouseEvent<HTMLElement>, file: FileItem) => void; onToggleFile?: (file: FileItem) => void; onToggleAll?: () => void }) {
+export function FileTable({ files, mode = 'default', selectedFileIds = new Set<string>(), allSelected = false, onFileContextMenu, onToggleFile, onToggleAll, onToggleStar }: { files: FileItem[]; mode?: 'default' | 'shared' | 'recent' | 'starred' | 'archived'; selectedFileIds?: Set<string>; allSelected?: boolean; onFileContextMenu?: (event: MouseEvent<HTMLElement>, file: FileItem) => void; onToggleFile?: (file: FileItem) => void; onToggleAll?: () => void; onToggleStar?: (file: FileItem) => void }) {
+  const renderStar = (file: FileItem, size: string) => {
+    const filled = mode === 'starred' || file.starred
+    const star = <Star className={filled ? `${size} fill-yellow-400 text-yellow-400` : `${size} text-slate-300`} />
+    if (!onToggleStar) return star
+    return (
+      <button type="button" onClick={(event) => { event.stopPropagation(); onToggleStar(file) }} className="flex items-center justify-center rounded-md p-0.5 hover:bg-slate-100" aria-label={filled ? `Unstar ${file.name}` : `Star ${file.name}`} aria-pressed={filled}>{star}</button>
+    )
+  }
   return (
     <div className="mt-5">
       <div className="grid gap-3 sm:hidden">
@@ -21,7 +29,7 @@ export function FileTable({ files, mode = 'default', selectedFileIds = new Set<s
             <article key={file.id ?? file.name} onClick={() => onToggleFile?.(file)} onContextMenu={(event) => onFileContextMenu?.(event, file)} className={selected ? 'overflow-hidden rounded-2xl border border-blue-200 bg-blue-50 p-4 shadow-sm' : 'overflow-hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-sm'}>
               <div className="flex items-start gap-3">
                 {onToggleFile ? <input type="checkbox" className="mt-1 h-5 w-5 shrink-0 accent-blue-600" checked={selected} onChange={() => onToggleFile?.(file)} onClick={(event) => event.stopPropagation()} /> : null}
-                <div className="mt-0.5 shrink-0">{mode === 'starred' ? <Star className="h-5 w-5 fill-yellow-400 text-yellow-400" /> : <FileIcon kind={file.kind} />}</div>
+                <div className="mt-0.5 shrink-0">{mode === 'starred' || file.starred ? renderStar(file, 'h-5 w-5') : <FileIcon kind={file.kind} />}</div>
                 <div className="min-w-0 flex-1 overflow-hidden">
                   <h3 className="line-clamp-2 break-all text-sm font-extrabold leading-snug text-slate-950" title={file.name}>{file.name}</h3>
                   <p className="mt-1 truncate text-xs text-slate-500">{meta}</p>
