@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Bell,
+  ClipboardList,
   FileArchive,
   Gauge,
   LogOut,
@@ -28,6 +29,7 @@ const menu = [
   { label: 'Quota Tracker', icon: Gauge, href: '/quota' },
   { label: 'Shared With Me', icon: Share2, href: '/shared' },
   { label: 'Starred', icon: Star, href: '/starred', disabled: true },
+  { label: 'Audit Codebase', icon: ClipboardList, href: '/audit' },
 ]
 
 type StorageSummary = {

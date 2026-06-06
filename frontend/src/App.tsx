@@ -3,6 +3,7 @@ import { ProtectedRoute } from '@/components/auth/ProtectedRoute'
 import { DriveLayout } from '@/layouts/DriveLayout'
 import { AllFilesPage } from '@/pages/AllFilesPage'
 import { ArchivedPage } from '@/pages/ArchivedPage'
+import { AuditPage } from '@/pages/AuditPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { GoogleAuthPage } from '@/pages/GoogleAuthPage'
 import { GoogleConnectedPage } from '@/pages/GoogleConnectedPage'
@@ -23,6 +24,7 @@ function App() {
       <Route path="google-connected" element={<GoogleConnectedPage />} />
       <Route path="public/files/:token" element={<PublicFilePage />} />
       <Route path="public/files/:token/embed" element={<PublicFilePage embed />} />
+      <Route path="audit" element={<AuditPage />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<DriveLayout />}>
           <Route index element={<Navigate to="/all-files" replace />} />
